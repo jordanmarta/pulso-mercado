@@ -12,6 +12,8 @@ import (
 	"pulso-mercado/internal/market"
 )
 
+const maxMessages = 5
+
 func main() {
 	ctx := context.Background()
 
@@ -27,24 +29,29 @@ func main() {
 
 	reader.SetOffset(kafkago.FirstOffset)
 
-	message, err := reader.ReadMessage(ctx)
-	if err != nil {
-		log.Fatalf("erro ao ler mensagem do Kafka: %v", err)
+	fmt.Println("mensagens consumidas:")
+	fmt.Println("offset | partition | symbol | price | volume")
+	fmt.Println("--------------------------------------------")
+
+	for i := 0; i < maxMessages; i++ {
+		message, err := reader.ReadMessage(ctx)
+		if err != nil {
+			log.Fatalf("erro ao ler mensagem do Kafka: %v", err)
+		}
+
+		var event market.QuoteEvent
+
+		if err := json.Unmarshal(message.Value, &event); err != nil {
+			log.Fatalf("erro ao desserializar evento: %v", err)
+		}
+
+		fmt.Printf(
+			"%6d | %9d | %-6s | %.2f | %d\n",
+			message.Offset,
+			message.Partition,
+			event.Symbol,
+			event.Price,
+			event.Volume,
+		)
 	}
-
-	var event market.QuoteEvent
-	if err := json.Unmarshal(message.Value, &event); err != nil {
-		log.Fatalf("erro ao desserializar evento: %v", err)
-	}
-
-	fmt.Println("mensagem consumida")
-	fmt.Printf("topic: %s\n", message.Topic)
-	fmt.Printf("partition: %d\n", message.Partition)
-	fmt.Printf("offset: %d\n", message.Offset)
-
-	fmt.Println("evento:")
-	fmt.Printf("symbol: %s\n", event.Symbol)
-	fmt.Printf("price: %.2f\n", event.Price)
-	fmt.Printf("volume: %d\n", event.Volume)
-	fmt.Printf("timestamp: %s\n", event.Timestamp)
 }
