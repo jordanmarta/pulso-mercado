@@ -12,26 +12,29 @@ import (
 	"pulso-mercado/internal/market"
 )
 
-const maxMessages = 5
+const (
+	partitionToRead = 1
+	maxMessages     = 1
+)
 
 func main() {
 	ctx := context.Background()
 
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
 		Brokers:   []string{appkafka.BrokerAddress},
-		Topic:     appkafka.TopicMarketQuotes,
-		Partition: 0,
+		Topic:     appkafka.TopicMarketQuotesPartitioned,
+		Partition: partitionToRead,
 		MinBytes:  1,
 		MaxBytes:  10e6,
 	})
 
 	defer reader.Close()
 
-	reader.SetOffset(kafkago.FirstOffset)
+	reader.SetOffset(kafkago.LastOffset)
 
-	fmt.Println("mensagens consumidas:")
-	fmt.Println("offset | partition | symbol | price | volume")
-	fmt.Println("--------------------------------------------")
+	fmt.Printf("lendo tópico %s / partition %d\n", appkafka.TopicMarketQuotesPartitioned, partitionToRead)
+	fmt.Println("offset | partition | key   | symbol | price | volume")
+	fmt.Println("-----------------------------------------------------")
 
 	for i := 0; i < maxMessages; i++ {
 		message, err := reader.ReadMessage(ctx)
@@ -46,9 +49,10 @@ func main() {
 		}
 
 		fmt.Printf(
-			"%6d | %9d | %-6s | %.2f | %d\n",
+			"%6d | %9d | %-5s | %-6s | %.2f | %d\n",
 			message.Offset,
 			message.Partition,
+			string(message.Key),
 			event.Symbol,
 			event.Price,
 			event.Volume,

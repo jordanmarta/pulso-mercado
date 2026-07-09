@@ -16,8 +16,9 @@ func main() {
 	ctx := context.Background()
 
 	writer := &kafkago.Writer{
-		Addr:  kafkago.TCP(appkafka.BrokerAddress),
-		Topic: appkafka.TopicMarketQuotes,
+		Addr:     kafkago.TCP(appkafka.BrokerAddress),
+		Topic:    appkafka.TopicMarketQuotesPartitioned,
+		Balancer: &kafkago.Hash{},
 	}
 
 	defer writer.Close()
@@ -36,6 +37,7 @@ func main() {
 		}
 
 		err = writer.WriteMessages(ctx, kafkago.Message{
+			Key:   []byte(event.Symbol),
 			Value: payload,
 		})
 
@@ -43,6 +45,11 @@ func main() {
 			log.Fatalf("erro ao publicar mensagem no Kafka: %v", err)
 		}
 
-		fmt.Printf("evento publicado no tópico %s: %s\n", appkafka.TopicMarketQuotes, string(payload))
+		fmt.Printf(
+			"evento publicado no tópico %s com key=%s: %s\n",
+			appkafka.TopicMarketQuotesPartitioned,
+			event.Symbol,
+			string(payload),
+		)
 	}
 }
