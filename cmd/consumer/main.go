@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	kafkago "github.com/segmentio/kafka-go"
 
@@ -13,26 +14,32 @@ import (
 )
 
 const (
-	partitionToRead = 1
-	maxMessages     = 1
+	consumerGroupID = "pulso-quotes-group-v1"
+	maxMessages     = 8
 )
 
 func main() {
 	ctx := context.Background()
 
+	instanceName := "consumer-1"
+	if len(os.Args) > 1 {
+		instanceName = os.Args[1]
+	}
+
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:   []string{appkafka.BrokerAddress},
-		Topic:     appkafka.TopicMarketQuotesPartitioned,
-		Partition: partitionToRead,
-		MinBytes:  1,
-		MaxBytes:  10e6,
+		Brokers:     []string{appkafka.BrokerAddress},
+		Topic:       appkafka.TopicMarketQuotesPartitioned,
+		GroupID:     consumerGroupID,
+		StartOffset: kafkago.FirstOffset,
+		MinBytes:    1,
+		MaxBytes:    10e6,
 	})
 
 	defer reader.Close()
 
-	reader.SetOffset(kafkago.LastOffset)
-
-	fmt.Printf("lendo tópico %s / partition %d\n", appkafka.TopicMarketQuotesPartitioned, partitionToRead)
+	fmt.Printf("instance: %s\n", instanceName)
+	fmt.Printf("consumer group: %s\n", consumerGroupID)
+	fmt.Printf("topic: %s\n", appkafka.TopicMarketQuotesPartitioned)
 	fmt.Println("offset | partition | key   | symbol | price | volume")
 	fmt.Println("-----------------------------------------------------")
 
