@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 
@@ -15,11 +17,11 @@ import (
 
 const (
 	consumerGroupID = "pulso-quotes-group-v1"
-	maxMessages     = 8
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	instanceName := "consumer-1"
 	if len(os.Args) > 1 {
@@ -40,12 +42,18 @@ func main() {
 	fmt.Printf("instance: %s\n", instanceName)
 	fmt.Printf("consumer group: %s\n", consumerGroupID)
 	fmt.Printf("topic: %s\n", appkafka.TopicMarketQuotesPartitioned)
-	fmt.Println("offset | partition | key   | symbol | price | volume")
-	fmt.Println("-----------------------------------------------------")
+	fmt.Println("aguardando mensagens...")
+	fmt.Println("time     | instance   | offset | partition | key   | symbol | price | volume")
+	fmt.Println("-------------------------------------------------------------------------")
 
-	for i := 0; i < maxMessages; i++ {
+	for {
 		message, err := reader.ReadMessage(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				fmt.Println("\nconsumer finalizado")
+				return
+			}
+
 			log.Fatalf("erro ao ler mensagem do Kafka: %v", err)
 		}
 
@@ -56,7 +64,9 @@ func main() {
 		}
 
 		fmt.Printf(
-			"%6d | %9d | %-5s | %-6s | %.2f | %d\n",
+			"%s | %-10s | %6d | %9d | %-5s | %-6s | %.2f | %d\n",
+			time.Now().Format("15:04:05"),
+			instanceName,
 			message.Offset,
 			message.Partition,
 			string(message.Key),
