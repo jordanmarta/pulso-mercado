@@ -42,19 +42,20 @@ func main() {
 	fmt.Printf("instance: %s\n", instanceName)
 	fmt.Printf("consumer group: %s\n", consumerGroupID)
 	fmt.Printf("topic: %s\n", appkafka.TopicMarketQuotesPartitioned)
+	fmt.Println("modo: fetch -> process -> commit")
 	fmt.Println("aguardando mensagens...")
-	fmt.Println("time     | instance   | offset | partition | key   | symbol | price | volume")
-	fmt.Println("-------------------------------------------------------------------------")
+	fmt.Println("time     | instance   | stage     | offset | partition | key   | symbol")
+	fmt.Println("-----------------------------------------------------------------------")
 
 	for {
-		message, err := reader.ReadMessage(ctx)
+		message, err := reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				fmt.Println("\nconsumer finalizado")
 				return
 			}
 
-			log.Fatalf("erro ao ler mensagem do Kafka: %v", err)
+			log.Fatalf("erro ao buscar mensagem do Kafka: %v", err)
 		}
 
 		var event market.QuoteEvent
@@ -63,16 +64,47 @@ func main() {
 			log.Fatalf("erro ao desserializar evento: %v", err)
 		}
 
-		fmt.Printf(
-			"%s | %-10s | %6d | %9d | %-5s | %-6s | %.2f | %d\n",
-			time.Now().Format("15:04:05"),
-			instanceName,
-			message.Offset,
-			message.Partition,
-			string(message.Key),
-			event.Symbol,
-			event.Price,
-			event.Volume,
-		)
+		printStage(instanceName, "fetched", message, event)
+
+		if err := processQuoteEvent(ctx, event); err != nil {
+			log.Printf("erro ao processar evento symbol=%s offset=%d partition=%d: %v",
+				event.Symbol,
+				message.Offset,
+				message.Partition,
+				err,
+			)
+
+			continue
+		}
+
+		printStage(instanceName, "processed", message, event)
+
+		if err := reader.CommitMessages(ctx, message); err != nil {
+			log.Fatalf("erro ao commitar offset: %v", err)
+		}
+
+		printStage(instanceName, "committed", message, event)
 	}
+}
+
+func processQuoteEvent(ctx context.Context, event market.QuoteEvent) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(300 * time.Millisecond):
+		return nil
+	}
+}
+
+func printStage(instanceName string, stage string, message kafkago.Message, event market.QuoteEvent) {
+	fmt.Printf(
+		"%s | %-10s | %-9s | %6d | %9d | %-5s | %-6s\n",
+		time.Now().Format("15:04:05"),
+		instanceName,
+		stage,
+		message.Offset,
+		message.Partition,
+		string(message.Key),
+		event.Symbol,
+	)
 }
