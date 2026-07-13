@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -20,13 +22,13 @@ const (
 )
 
 func main() {
+	instanceName := flag.String("instance", "consumer-1", "nome da instância do consumer")
+	failSymbol := flag.String("fail-symbol", "", "symbol que deve falhar antes do commit")
+
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-
-	instanceName := "consumer-1"
-	if len(os.Args) > 1 {
-		instanceName = os.Args[1]
-	}
 
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
 		Brokers:     []string{appkafka.BrokerAddress},
@@ -39,10 +41,11 @@ func main() {
 
 	defer reader.Close()
 
-	fmt.Printf("instance: %s\n", instanceName)
+	fmt.Printf("instance: %s\n", *instanceName)
 	fmt.Printf("consumer group: %s\n", consumerGroupID)
 	fmt.Printf("topic: %s\n", appkafka.TopicMarketQuotesPartitioned)
 	fmt.Println("modo: fetch -> process -> commit")
+	fmt.Printf("fail-symbol: %q\n", *failSymbol)
 	fmt.Println("aguardando mensagens...")
 	fmt.Println("time     | instance   | stage     | offset | partition | key   | symbol")
 	fmt.Println("-----------------------------------------------------------------------")
@@ -64,36 +67,43 @@ func main() {
 			log.Fatalf("erro ao desserializar evento: %v", err)
 		}
 
-		printStage(instanceName, "fetched", message, event)
+		printStage(*instanceName, "fetched", message, event)
 
-		if err := processQuoteEvent(ctx, event); err != nil {
-			log.Printf("erro ao processar evento symbol=%s offset=%d partition=%d: %v",
+		if err := processQuoteEvent(ctx, event, *failSymbol); err != nil {
+			log.Printf(
+				"falha no processamento: symbol=%s offset=%d partition=%d erro=%v",
 				event.Symbol,
 				message.Offset,
 				message.Partition,
 				err,
 			)
 
-			continue
+			log.Println("encerrando sem commitar esta mensagem")
+			return
 		}
 
-		printStage(instanceName, "processed", message, event)
+		printStage(*instanceName, "processed", message, event)
 
 		if err := reader.CommitMessages(ctx, message); err != nil {
 			log.Fatalf("erro ao commitar offset: %v", err)
 		}
 
-		printStage(instanceName, "committed", message, event)
+		printStage(*instanceName, "committed", message, event)
 	}
 }
 
-func processQuoteEvent(ctx context.Context, event market.QuoteEvent) error {
+func processQuoteEvent(ctx context.Context, event market.QuoteEvent, failSymbol string) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(300 * time.Millisecond):
-		return nil
 	}
+
+	if failSymbol != "" && event.Symbol == failSymbol {
+		return errors.New("falha simulada antes do commit")
+	}
+
+	return nil
 }
 
 func printStage(instanceName string, stage string, message kafkago.Message, event market.QuoteEvent) {
