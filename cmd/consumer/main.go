@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
@@ -18,12 +20,14 @@ import (
 )
 
 const (
-	consumerGroupID = "pulso-quotes-group-v1"
+	consumerGroupID     = "pulso-quotes-group-v1"
+	processedQuotesFile = "data/processed-quotes.log"
 )
 
 func main() {
 	instanceName := flag.String("instance", "consumer-1", "nome da instância do consumer")
-	failSymbol := flag.String("fail-symbol", "", "symbol que deve falhar antes do commit")
+	failSymbol := flag.String("fail-symbol", "", "symbol que deve falhar durante o processamento")
+	crashAfterRecordSymbol := flag.String("crash-after-record-symbol", "", "symbol que deve simular crash depois do registro e antes do commit")
 
 	flag.Parse()
 
@@ -44,11 +48,12 @@ func main() {
 	fmt.Printf("instance: %s\n", *instanceName)
 	fmt.Printf("consumer group: %s\n", consumerGroupID)
 	fmt.Printf("topic: %s\n", appkafka.TopicMarketQuotesPartitioned)
-	fmt.Println("modo: fetch -> process -> commit")
+	fmt.Println("modo: fetch -> idempotency check -> process -> record -> commit")
 	fmt.Printf("fail-symbol: %q\n", *failSymbol)
+	fmt.Printf("crash-after-record-symbol: %q\n", *crashAfterRecordSymbol)
 	fmt.Println("aguardando mensagens...")
-	fmt.Println("time     | instance   | stage     | offset | partition | key   | symbol")
-	fmt.Println("-----------------------------------------------------------------------")
+	fmt.Println("time     | instance   | stage            | offset | partition | key   | symbol")
+	fmt.Println("-------------------------------------------------------------------------------")
 
 	for {
 		message, err := reader.FetchMessage(ctx)
@@ -69,9 +74,25 @@ func main() {
 
 		printStage(*instanceName, "fetched", message, event)
 
+		alreadyRecorded, err := wasQuoteAlreadyRecorded(message)
+		if err != nil {
+			log.Fatalf("erro ao verificar idempotência: %v", err)
+		}
+
+		if alreadyRecorded {
+			printStage(*instanceName, "already-recorded", message, event)
+
+			if err := reader.CommitMessages(ctx, message); err != nil {
+				log.Fatalf("erro ao commitar offset: %v", err)
+			}
+
+			printStage(*instanceName, "committed", message, event)
+			continue
+		}
+
 		if err := processQuoteEvent(ctx, event, *failSymbol); err != nil {
 			log.Printf(
-				"falha no processamento: symbol=%s offset=%d partition=%d erro=%v",
+				"falha durante processamento: symbol=%s offset=%d partition=%d erro=%v",
 				event.Symbol,
 				message.Offset,
 				message.Partition,
@@ -83,6 +104,32 @@ func main() {
 		}
 
 		printStage(*instanceName, "processed", message, event)
+
+		if err := recordProcessedQuote(message, event); err != nil {
+			log.Printf(
+				"falha ao registrar cotação processada: symbol=%s offset=%d partition=%d erro=%v",
+				event.Symbol,
+				message.Offset,
+				message.Partition,
+				err,
+			)
+
+			log.Println("encerrando sem commitar esta mensagem")
+			return
+		}
+
+		printStage(*instanceName, "recorded", message, event)
+
+		if *crashAfterRecordSymbol != "" && event.Symbol == *crashAfterRecordSymbol {
+			log.Printf(
+				"simulando crash depois do registro e antes do commit: symbol=%s offset=%d partition=%d",
+				event.Symbol,
+				message.Offset,
+				message.Partition,
+			)
+
+			os.Exit(1)
+		}
 
 		if err := reader.CommitMessages(ctx, message); err != nil {
 			log.Fatalf("erro ao commitar offset: %v", err)
@@ -100,15 +147,78 @@ func processQuoteEvent(ctx context.Context, event market.QuoteEvent, failSymbol 
 	}
 
 	if failSymbol != "" && event.Symbol == failSymbol {
-		return errors.New("falha simulada antes do commit")
+		return errors.New("falha simulada durante processamento")
 	}
 
 	return nil
 }
 
+func recordProcessedQuote(message kafkago.Message, event market.QuoteEvent) error {
+	if err := os.MkdirAll("data", 0755); err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(processedQuotesFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+
+	defer file.Close()
+
+	line := fmt.Sprintf(
+		"event_id=%s topic=%s partition=%d offset=%d key=%s symbol=%s price=%.2f volume=%d at=%s\n",
+		quoteProcessingID(message),
+		message.Topic,
+		message.Partition,
+		message.Offset,
+		string(message.Key),
+		event.Symbol,
+		event.Price,
+		event.Volume,
+		time.Now().Format(time.RFC3339),
+	)
+
+	_, err = file.WriteString(line)
+	return err
+}
+
+func wasQuoteAlreadyRecorded(message kafkago.Message) (bool, error) {
+	file, err := os.Open(processedQuotesFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	defer file.Close()
+
+	expectedPrefix := "event_id=" + quoteProcessingID(message)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, expectedPrefix) {
+			return true, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+
+	return false, nil
+}
+
+func quoteProcessingID(message kafkago.Message) string {
+	return fmt.Sprintf("%s:%d:%d", message.Topic, message.Partition, message.Offset)
+}
+
 func printStage(instanceName string, stage string, message kafkago.Message, event market.QuoteEvent) {
 	fmt.Printf(
-		"%s | %-10s | %-9s | %6d | %9d | %-5s | %-6s\n",
+		"%s | %-10s | %-16s | %6d | %9d | %-5s | %-6s\n",
 		time.Now().Format("15:04:05"),
 		instanceName,
 		stage,
